@@ -1,0 +1,6 @@
+project/
+.idea
+spark-warehouse
+checkpoints
+.DS_Store
+**/.DS_Store

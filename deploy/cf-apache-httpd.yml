@@ -1,0 +1,269 @@
+# Deploy via:
+#aws cloudformation create-stack  --stack-name httpd --template-body file://deploy/cf-apache-httpd.yml \
+#        --parameters ParameterKey=KeyName,ParameterValue=gen_key_pair ParameterKey=DBRootPassword,ParameterValue=MyPassword123 \
+#        ParameterKey=SSHLocation,ParameterValue=<my-ip>/32
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS CloudFormation Sample Template LAMP_Single_Instance: Create a LAMP
+  stack using a single EC2 instance and a local MySQL database for storage. This template
+  demonstrates using the AWS CloudFormation bootstrap scripts to install the packages
+  and files necessary to deploy the Apache web server, PHP and MySQL at instance launch
+  time. **WARNING** This template creates an Amazon EC2 instance. You will be billed
+  for the AWS resources used if you create a stack from this template.'
+Parameters:
+  DBName:
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+    Default: MyDatabase
+    Description: MySQL database name
+    MaxLength: 64
+    MinLength: 1
+    Type: String
+  DBPassword:
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: must contain only alphanumeric characters.
+    Description: Password for MySQL database access
+    MaxLength: 41
+    MinLength: 1
+    NoEcho: true
+    Type: String
+  DBRootPassword:
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: must contain only alphanumeric characters.
+    Description: Root password for MySQL
+    MaxLength: 41
+    MinLength: 1
+    NoEcho: true
+    Type: String
+  DBUser:
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+    Description: Username for MySQL database access
+    MaxLength: 16
+    MinLength: 1
+    NoEcho: true
+    Type: String
+    Default: defaultuser
+  InstanceType:
+    AllowedValues: [t2.nano, t2.micro, t2.small, t2.medium, t2.large]
+    ConstraintDescription: must be a valid EC2 instance type.
+    Default: t2.micro
+    Description: WebServer EC2 instance type
+    Type: String
+  KeyName:
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+  SSHLocation:
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+    Default: 0.0.0.0/0
+    Description: The IP address range that can be used to SSH to the EC2 instances
+    MaxLength: 18
+    MinLength: 9
+    Type: String
+
+Mappings:
+  AWSInstanceType2Arch:
+    t2.large: {Arch: HVM64}
+    t2.medium: {Arch: HVM64}
+    t2.micro: {Arch: HVM64}
+    t2.nano: {Arch: HVM64}
+    t2.small: {Arch: HVM64}
+  AWSInstanceType2NATArch:
+    t2.large: {Arch: NATHVM64}
+    t2.medium: {Arch: NATHVM64}
+    t2.micro: {Arch: NATHVM64}
+    t2.nano: {Arch: NATHVM64}
+    t2.small: {Arch: NATHVM64}
+  AWSRegionArch2AMI:
+    us-east-1: {HVM64: ami-6869aa05}
+    us-east-2: {HVM64: ami-f6035893}
+    us-west-1: {HVM64: ami-31490d51}
+    us-west-2: {HVM64: ami-7172b611}
+
+Resources:
+  WebServerInstance:
+    CreationPolicy:
+      ResourceSignal: {Timeout: PT5M}
+    Metadata:
+      AWS::CloudFormation::Init:
+        Configure:
+          commands:
+            01_set_mysql_root_password:
+              command:
+                Fn::Join:
+                  - ''
+                  - - mysqladmin -u root password '
+                    - {Ref: DBRootPassword}
+                    - ''''
+              test:
+                Fn::Join:
+                  - ''
+                  - - '$(mysql '
+                    - !Ref DBName
+                    - ' -u root --password='''
+                    - !Ref DBRootPassword
+                    - ''' >/dev/null 2>&1 </dev/null); (( $? != 0 ))'
+            02_create_database:
+              command:
+                Fn::Join:
+                  - ''
+                  - - mysql -u root --password='
+                    - !Ref DBRootPassword
+                    - ''' < /tmp/setup.mysql'
+              test:
+                Fn::Join:
+                  - ''
+                  - - '$(mysql '
+                    - !Ref DBName
+                    - ' -u root --password='''
+                    - !Ref DBRootPassword
+                    - ''' >/dev/null 2>&1 </dev/null); (( $? != 0 ))'
+        Install:
+          files:
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+              group: root
+              mode: '000400'
+              owner: root
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.WebServerInstance.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource WebServerInstance --configsets InstallAndRun --region ${AWS::Region}
+                runas=root
+            /tmp/setup.mysql:
+              content: !Sub |
+                CREATE DATABASE ${DBName};
+                GRANT ALL ON ${DBName}.* TO '${DBUser}'@'localhost' IDENTIFIED BY '${DBPassword}';
+              group: root
+              mode: '000400'
+              owner: root
+            /var/www/html/index.php:
+              content: !Sub |
+                <html>
+                  <head>
+                    <title>PHP Sample Landing Page</title>
+                    <meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">
+                  </head>
+                  <body>
+                    <h1>Welcome to Your Landing Page</h1>
+                    <p/>
+                      <?php
+                        // Print out the current data and time
+                        print "The Current Date and Time is: <br/>";
+                        print date("g:i A l, F j Y.");
+                      ?>
+                    <p/>
+                      <?php
+                        // Setup a handle for CURL
+                        $curl_handle=curl_init();
+                        curl_setopt($curl_handle,CURLOPT_CONNECTTIMEOUT,2);
+                        curl_setopt($curl_handle,CURLOPT_RETURNTRANSFER,1);
+                        // Get the hostname of the intance from the instance metadata
+                        curl_setopt($curl_handle,CURLOPT_URL,'http://169.254.169.254/latest/meta-data/public-hostname');
+                        $hostname = curl_exec($curl_handle);
+                        if (empty($hostname)) {
+                          print "Sorry, for some reason, we got no hostname back <br />";
+                        }
+                        else {
+                          print "Server = " . $hostname . "<br />";
+                        }
+                        // Get the instance-id of the intance from the instance metadata
+                        curl_setopt($curl_handle,CURLOPT_URL,'http://169.254.169.254/latest/meta-data/instance-id');
+                        $instanceid = curl_exec($curl_handle);
+                        if (empty($instanceid)) {
+                          print "Sorry, for some reason, we got no instance id back <br />";
+                        }
+                        else {
+                          print "EC2 instance-id = " . $instanceid . "<br />";
+                        }
+                        $Database = "localhost";
+                        $DBUser  = "${DBUser}";
+                        $DBPassword = "${DBPassword}";
+                        print "Database = " . $Database . "<br />";
+                        $dbconnection = mysql_connect($Database, $DBUser, $DBPassword) or die("Could not connect: " . mysql_error());
+                        print ("Connected to $Database successfully");
+                        mysql_close($dbconnection);
+                      ?>
+                      <h2>PHP Information</h2>
+                    <p/>
+                    <?php
+                      phpinfo();
+                    ?>
+                  </body>
+                </html>
+              group: apache
+              mode: '000600'
+              owner: apache
+          packages:
+            yum:
+              httpd: []
+              mysql: []
+              mysql-libs: []
+              mysql-server: []
+              php: []
+              php-mysql: []
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files: [/etc/cfn/cfn-hup.conf, /etc/cfn/hooks.d/cfn-auto-reloader.conf]
+              httpd:
+                enabled: true
+                ensureRunning: true
+              mysqld:
+                enabled: true
+                ensureRunning: true
+        configSets:
+          InstallAndRun: [Install, Configure]
+    Properties:
+      ImageId:
+        Fn::FindInMap:
+          - AWSRegionArch2AMI
+          - !Ref AWS::Region
+          - Fn::FindInMap:
+              - AWSInstanceType2Arch
+              - !Ref InstanceType
+              - Arch
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroups:
+        - !Ref WebServerSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          yum update -y aws-cfn-bootstrap
+          # Install the files and packages from the metadata
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource WebServerInstance --configsets InstallAndRun --region ${AWS::Region}
+          # Signal the status from cfn-init
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource WebServerInstance --region ${AWS::Region}
+    Type: AWS::EC2::Instance
+  WebServerSecurityGroup:
+    Properties:
+      GroupDescription: Enable HTTP access via port 80
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+        - CidrIp: !Ref SSHLocation
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+    Type: AWS::EC2::SecurityGroup
+
+Outputs:
+  WebsiteURL:
+    Description: URL for newly created LAMP stack
+    Value:
+      Fn::Join:
+        - ''
+        - - http://
+          - Fn::GetAtt: [WebServerInstance, PublicDnsName]
