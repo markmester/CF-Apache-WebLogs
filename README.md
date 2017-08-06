@@ -8,4 +8,4 @@ Apache https logs -> S3 Bucket -> SQS trigger -> NiFi for parsing -> Kinesis/Kaf
 
 
 ## Notes:
--   This pipeline completed up to the NiFi input stage. Still need to parse logs and send the EMR/Redshift.
+-   This pipeline completed up to the NiFi input stage. Still need to parse logs and send to EMR/Redshift.
