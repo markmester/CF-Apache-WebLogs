@@ -1,0 +1,72 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS CloudFormation Template NiFi_Single_Instance: Creates a NiFi instance configure to ingest logs from
+an S3 bucket and output to a Kinesis Stream'
+Parameters:
+  InstanceType:
+    AllowedValues: [t2.nano, t2.micro, t2.small, t2.medium, t2.large]
+    ConstraintDescription: must be a valid EC2 instance type.
+    Default: t2.micro
+    Description: WebServer EC2 instance type
+    Type: String
+  KeyName:
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+  RemoteLocation:
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+    Default: 0.0.0.0/0
+    Description: The IP address range that can be used to access services on and ssh to the EC2 instances
+    MaxLength: 18
+    MinLength: 9
+    Type: String
+
+Mappings:
+  AWSInstanceType2Arch:
+    t2.large: {Arch: HVM64}
+    t2.medium: {Arch: HVM64}
+    t2.micro: {Arch: HVM64}
+    t2.nano: {Arch: HVM64}
+    t2.small: {Arch: HVM64}
+  AWSInstanceType2NATArch:
+    t2.large: {Arch: NATHVM64}
+    t2.medium: {Arch: NATHVM64}
+    t2.micro: {Arch: NATHVM64}
+    t2.nano: {Arch: NATHVM64}
+    t2.small: {Arch: NATHVM64}
+  AWSRegionArch2AMI:
+    us-east-1: {HVM64: ami-6869aa05}
+    us-east-2: {HVM64: ami-f6035893}
+    us-west-1: {HVM64: ami-31490d51}
+    us-west-2: {HVM64: ami-7172b611}
+
+Resources:
+  CFSSHAccess:
+    # Security group for EC2 instances allowing SSH access
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSH access
+      SecurityGroupIngress:
+        - {CidrIp: !Ref RemoteLocation, FromPort: 22, IpProtocol: tcp, ToPort: 22}
+
+  NifiInstance:
+      # Hosts Apache Nifi accessible via port 8080
+      Type: AWS::EC2::Instance
+      Properties:
+        ImageId: !FindInMap [AWSRegionArch2AMI, !Ref 'AWS::Region', !FindInMap [AWSInstanceType2Arch, !Ref InstanceType, Arch]]
+        KeyName: !Ref KeyName
+        InstanceType: !Ref InstanceType
+        Tags:
+          - {Key: Name, Value: NiFi}
+          - {Key: auto_off, Value: true}
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            yum update -y aws-cfn-bootstrap
+            yum install -y docker
+            service docker start
+            docker pull apache/nifi:1.3.0
+            docker run -d --name nifi -p 8080:8080 -p 8081:8081 apache/nifi:1.3.0
+        SecurityGroups:
+          - !Ref CFSSHAccess

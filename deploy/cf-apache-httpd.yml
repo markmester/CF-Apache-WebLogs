@@ -1,16 +1,25 @@
-# Deploy via:
-#aws cloudformation create-stack  --stack-name httpd --template-body file://deploy/cf-apache-httpd.yml \
-#        --parameters ParameterKey=KeyName,ParameterValue=gen_key_pair ParameterKey=DBRootPassword,ParameterValue=MyPassword123 \
-#        ParameterKey=SSHLocation,ParameterValue=<my-ip>/32
 ---
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'AWS CloudFormation Sample Template LAMP_Single_Instance: Create a LAMP
-  stack using a single EC2 instance and a local MySQL database for storage. This template
-  demonstrates using the AWS CloudFormation bootstrap scripts to install the packages
-  and files necessary to deploy the Apache web server, PHP and MySQL at instance launch
-  time. **WARNING** This template creates an Amazon EC2 instance. You will be billed
-  for the AWS resources used if you create a stack from this template.'
+Description: "AWS CloudFormation Template LAMP_Single_Instance: Creates a LAMP
+  stack using a single EC2 instance and a local MySQL database for storage. FluentD is installed to
+  push logs to the created S3 bucket 'HttpdLogBucket'."
 Parameters:
+  AWSAccessKey:
+    # Only needed if not using an AWS Instance Profile
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: must contain only alphanumeric characters.
+    Description: AWS Access key for use with fluentd
+    Default: SomeAccessKey
+    NoEcho: true
+    Type: String
+  AWSSecretAccessKey:
+      # Only needed if not using an AWS Instance Profile
+      AllowedPattern: '[a-zA-Z0-9]*'
+      ConstraintDescription: must contain only alphanumeric characters.
+      Description: AWS Secret Access key for use with fluentd
+      Default: SomeSecretAccessKey
+      NoEcho: true
+      Type: String
   DBName:
     AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
     ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
@@ -83,7 +92,57 @@ Mappings:
     us-west-2: {HVM64: ami-7172b611}
 
 Resources:
+  RootRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ["ec2.amazonaws.com"]
+            Action: ["sts:AssumeRole"]
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action: '*'
+                Effect: Allow
+                Resource: '*'
+
+  IAMProfile:
+    DependsOn:
+      - RootRole
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles: [!Ref RootRole]
+
+  HttpdLogBucket:
+    # S3 bucket in which raw httpd logs will be pushed to
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Join:
+          - '-'
+          - - httpd-logs
+            - !Ref AWS::AccountId
+            - !Ref AWS::Region
+## IMPORTANT! -- Due to a known limitation with CloudFormation in subscribing SNS topics, to subscribe this topic
+## wait until stack creation is 'COMPLETE', uncomment the following NotificationConfiguration,
+## and perform a stack-update operation
+## https://aws.amazon.com/premiumsupport/knowledge-center/unable-validate-destination-s3/
+#      NotificationConfiguration:
+#        QueueConfigurations:
+#          - Event: s3:ObjectCreated:Put
+#            Queue: !GetAtt SQSQueue.Arn:
+
   WebServerInstance:
+    # Apache Httpd webserver running FluentD for log transport
+    DependsOn:
+      - IAMProfile
     CreationPolicy:
       ResourceSignal: {Timeout: PT5M}
     Metadata:
@@ -122,6 +181,34 @@ Resources:
                     - ''' >/dev/null 2>&1 </dev/null); (( $? != 0 ))'
         Install:
           files:
+            /etc/td-agent/td-agent.conf:
+              content: !Sub |
+                <source>
+                  @type tail
+                  format apache2
+                  path /var/log/httpd/access_log
+                  pos_file /var/log/td-agent/apache2.access_log.pos
+                  tag s3.apache.access
+                </source>
+
+                <match s3.*.*>
+                  @type s3
+
+                #  aws_key_id ${AWSAccessKey}
+                #  aws_sec_key ${AWSSecretAccessKey}
+                  s3_bucket ${HttpdLogBucket}
+                  path logs/
+                  buffer_path /var/log/td-agent/s3
+
+                  time_slice_format %Y%m%d%H%M
+                  time_slice_wait 10m
+                  utc
+
+                  buffer_chunk_limit 256m
+                </match>
+              group: root
+              mode: '000400'
+              owner: root
             /etc/cfn/cfn-hup.conf:
               content: !Sub |
                 [main]
@@ -224,14 +311,11 @@ Resources:
         configSets:
           InstallAndRun: [Install, Configure]
     Properties:
-      ImageId:
-        Fn::FindInMap:
-          - AWSRegionArch2AMI
-          - !Ref AWS::Region
-          - Fn::FindInMap:
-              - AWSInstanceType2Arch
-              - !Ref InstanceType
-              - Arch
+      IamInstanceProfile: !Ref IAMProfile
+      Tags:
+        - {Key: Name, Value: httpd}
+        - {Key: auto_off, Value: true}
+      ImageId: !FindInMap [AWSRegionArch2AMI, !Ref 'AWS::Region', !FindInMap [AWSInstanceType2Arch, !Ref InstanceType, Arch]]
       InstanceType: !Ref InstanceType
       KeyName: !Ref KeyName
       SecurityGroups:
@@ -244,6 +328,18 @@ Resources:
           /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource WebServerInstance --configsets InstallAndRun --region ${AWS::Region}
           # Signal the status from cfn-init
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource WebServerInstance --region ${AWS::Region}
+
+          # Install TD-agent
+          curl -L https://toolbelt.treasuredata.com/sh/install-redhat-td-agent2.sh | sh
+          sudo usermod -aG adm td-agent
+          chmod 0645 /etc/td-agent/td-agent.conf
+          chmod 0645 /var/log/httpd
+          chmod 0755 -R /var/run/td-agent
+
+
+          # Start TD-agent
+          /etc/init.d/td-agent restart
+
     Type: AWS::EC2::Instance
   WebServerSecurityGroup:
     Properties:

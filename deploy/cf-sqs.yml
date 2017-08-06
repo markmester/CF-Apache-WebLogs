@@ -1,0 +1,40 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS CloudFormation Template for creating an sqs queue configured to receive object creation events
+from an S3 bucket.'
+Parameters:
+  BucketName:
+    # Only needed if not using an AWS Instance Profile. Note that this assumes the bucket was created in the standard
+    # format: <bucket-name>-<account-id>-<region>. Input here should only be the bucket name.
+    AllowedPattern: '[a-zA-Z0-9-]*'
+    ConstraintDescription: must contain only alphanumeric characters and dashes.
+    Description: AWS S3 bucket to configure sqs trigger for
+    Type: String
+Resources:
+  SQSQueue:
+    # SQS for sending data from the Firehose S3 bucket to the NiFI instance
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: SQSQueue
+  S3toSQSPolicy:
+    # IAM policy for allowing S3 to send events to SQS
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Id: S3toSQSPolicy
+        Statement:
+          - Action: ['sqs:SendMessage']
+            Condition:
+              ArnLike:
+                aws:SourceArn:
+                  - Fn::Join:
+                      - ''
+                      - - 'arn:aws:s3:::'
+                        - Fn::Join: ['-', [!Ref BucketName, !Ref 'AWS::AccountId', !Ref 'AWS::Region']]
+            Effect: Allow
+            Principal: '*'
+            Resource: !GetAtt SQSQueue.Arn
+            Sid: Allow-S3-SendMessage
+      Queues:
+        - !Ref SQSQueue
